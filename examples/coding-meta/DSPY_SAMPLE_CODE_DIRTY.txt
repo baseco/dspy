@@ -1,0 +1,1205 @@
+class MultiHopQAWithAssertions(dspy.Module): ...
+def forward(self, question):
+context, queries = [], [question]
+query = self.generate_query(context=context, question=question).query
+dspy.Suggest(len(query) < 100,
+      "Query should be less than 100 characters")
+dspy.Suggest(is_query_distinct(query, queries),
+
+f"Query should be distinct from {queries}")
+context += self.retrieve(query).passages
+queries.append(query)
+return self.generate_answer(context=context, question=question)
+
+
+class ChainOfThought(dspy.Module):
+  def __init__(self, signature):
+    rationale_field = dspy.OutputField(
+        prefix="Reasoning: Think step by step.")
+    signature = dspy.Signature(signature).
+        prepend_output_field(rationale_field)
+    self.predict = dspy.Predict(signature)
+  def forward(self, **kwargs):
+    return self.predict(**kwargs)
+
+
+
+class MultiHopQA(dspy.Module): def __init__(self):
+self.retrieve = dspy.Retrieve(k=3)
+self.gen_query = dspy.ChainOfThought("context,question -> query") self.gen_answer = dspy.ChainOfThought("context,question -> answer")
+def forward(self, question): context = []
+for hop in range(2):
+query = self.gen_query(context=context, question=question).query context += self.retrieve(query).passages
+return self.gen_answer(context=context, question=question)
+
+
+class LongFormQAWithAssertions(dspy.Module): def __init__(self, passages_per_hop=3):
+self.retrieve = dspy.Retrieve(k=passages_per_hop)
+self.generate_query = dspy.ChainOfThought("context, question -> query")
+self.generate_cited_paragraph = dspy.ChainOfThought("context, question -> paragraph") #has field description to
+      include citations
+  def forward(self, question):
+    context = []
+for hop in range(2):
+query = self.generate_query(context=context, question=question).query context += self.retrieve(query).passages
+pred = self.generate_cited_paragraph(context=context, question=question) dspy.Suggest(citations_check(pred.paragraph), "Every 1-2 sentences should have citations: ’text... [x].’")
+for line, citation in get_lines_and_citations(pred, context):
+dspy.Suggest(is_faithful(line, citation), f"Your output should be based on the context: ’{citations}’.")
+return pred
+
+
+
+
+
+class QuizChoiceGenerationWithAssertions(dspy.Module): def __init__(self):
+        super().__init__()
+self.generate_choices = dspy.ChainOfThought("question, correct_answer, number_of_choices -> answer_choices" ) #has specified instruction to guide inputs -> outputs
+def forward(self, question, answer):
+choice_string = self.generate_choices(question=question, correct_answer=answer, number_of_choices=
+number_of_choices).answer_choices
+dspy.Suggest(format_checker(choice_string), "The format of the answer choices should be in JSON format.
+Please revise accordingly.")
+dspy.Suggest(is_correct_answer_included(answer, choice_string), "The answer choices do not include the
+correct answer to the question. Please revise accordingly.")
+plausibility_question = "Are the distractors in the answer choices plausible and not easily identifiable as
+incorrect?"
+plausibility_assessment = dspy.Predict("question, answer_choices, assessment_question -> assessment_answer"
+)(question=question, answer_choices=choice_string, assessment_question=plausibility_question)
+dspy.Suggest(is_plausibility_yes(plausibility_assessment.assessment_answer), "The answer choices are not plausible distractors or are too easily identifiable as incorrect. Please revise to provide more challenging and plausible distractors.")
+return dspy.Prediction(choices = choice_string)
+
+
+
+class TweetGenerationWithAssertions(dspy.Module): def __init__(self):
+        super().__init__()
+self.generate_tweet = dspy.ChainOfThought("question, context -> tweet") #has specified instruction to guide inputs -> outputs
+    def forward(self, question, answer):
+        context = []
+generate_query = [dspy.ChainOfThought("context, question -> query") for _ in range(2)] retrieve = dspy.Retrieve(k=3)
+for hop in range(2):
+query = generate_query[hop](context=context, question=question).query passages = retrieve(query).passages
+context = deduplicate(context + passages)
+generated_tweet = self.generate_tweet(question=question, context=context).tweet
+dspy.Suggest(has_no_hashtags(generated_tweet), f"Please revise the tweet to remove hashtag phrases following it.")
+dspy.Suggest(is_within_length_limit(generated_tweet, 280), f"Please ensure the tweet is within {280} characters.")
+dspy.Suggest(has_correct_answer(generated_tweet, answer), "The tweet does not include the correct answer to the question. Please revise accordingly.")
+engaging_question = "Does the assessed text make for a self-contained, engaging tweet? Say no if it is not engaging."
+engaging_assessment = dspy.Predict("context, assessed_text, assessment_question -> assessment_answer")( context=context, assessed_text=generated_tweet, assessment_question=engaging_question)
+dspy.Suggest(is_assessment_yes(engaging_assessment.assessment_answer), "The text is not engaging enough. Please revise to make it more captivating.")
+faithful_question = "Is the assessed text grounded in the context? Say no if it includes significant facts not in the context."
+faithful_assessment = dspy.Predict("context, assessed_text, assessment_question -> assessment_answer")( context=’N/A’, assessed_text=generated_tweet, assessment_question=faithful_question)
+dspy.Suggest(is_assessment_yes(faithful_assessment.assessment_answer), "The text contains unfaithful elements or significant facts not in the context. Please revise for accuracy.")
+return dspy.Prediction(generated_tweet=generated_tweet, context=context)
+
+
+
+
+class HotPotQAProgram(dspy.Module):
+def __init__(self, passages_per_hop=3):
+super().__init__()
+self.retrieve = dspy.Retrieve(k=passages_per_hop) self.generate_query = [dspy.ChainOfThought("context ,
+search_query") for _ in range(2)] self.generate_answer = dspy.ChainOfThought("context ,
+def forward(self, question): context = []
+question ->
+question ->
+answer")
+for hop in range(2):
+search_query = self.generate_query[hop](context=context, question=
+question).search_query
+passages = self.retrieve(search_query).passages context = dsp.utils.deduplicate(context + passages)
+return self.generate_answer(context=context , question=question).copy(context =context)
+
+
+
+class CoTProgram(dspy.Module): def __init__(self):
+super().__init__()
+self.prog = dspy.ChainOfThought("question -> answer")
+def forward(self, question):
+return self.prog(question=question)
+
+
+
+
+class IrisSignature(dspy.Signature):
+"Given the petal and sepal dimensions in cm, predict the iris species."
+petal_length = dspy.InputField()
+petal_width = dspy.InputField()
+sepal_length = dspy.InputField()
+sepal_width = dspy.InputField()
+answer = dspy.OutputField(desc='setosa, versicolour, or virginica')
+class IrisProgram(dspy.Module): def __init__(self):
+self.pred = dspy.ChainOfThought(IrisSignature)
+def forward(self, petal_length, petal_width, sepal_length, sepal_width): return self.pred(petal_length=petal_length , petal_width=petal_width ,
+sepal_length=sepal_length , sepal_width=sepal_width)
+
+
+
+class GenerateSingleModuleInstruction(dspy.Signature):
+"""Use the information below to learn about a task that we are trying to solve using calls to an LM, then generate a new instruction that will be used to prompt a Language Model to better solve the task."""
+dataset_description = dspy.InputField(desc="A description of the dataset that we are using.",)
+program_code = dspy.InputField(desc="Language model program designed to solve a particular task.",)
+program_description = dspy.InputField(desc="Summary of the task the program is designed to solve, and how it goes about solving it.")
+module = dspy.InputField(desc="The module to create an instruction for.")
+task_demos = dspy.InputField(desc="Example inputs/ outputs of our module.")
+previous_instructions = dspy.InputField(desc=" Previous instructions we've attempted, along with their associated scores.")
+basic_instruction = dspy.InputField(desc="Basic instruction.")
+tip = dspy.InputField(desc="A suggestion for how to go about generating the new instruction.")
+proposed_instruction = dspy.OutputField(desc=" Propose an instruction that will be used to prompt a Language Model to perform this task.")
+
+
+
+
+class RetrieveMultiHop(dspy.Module): def __init__(self):
+super().__init__()
+self.k = 7
+self.create_query_hop2 = dspy.ChainOfThought("claim,
+summary_1 ->query")
+self.create_query_hop3 = dspy.ChainOfThought("claim,
+summary_1 ,summary_2 ->query")
+self.retrieve_k = dspy.Retrieve(k=self.k) self.summarize1 = dspy.ChainOfThought("claim,passages->
+summary")
+self.summarize2 = dspy.ChainOfThought("claim,context,
+passages ->summary")
+def forward(self,claim): # HOP 1
+hop1_docs = self.retrieve_k(claim).passages summary_1 = self.summarize1(claim=claim, passages=
+hop1_docs).summary # Summarize top k docs
+# HOP 2
+hop2_query = self.create_query_hop2(claim=claim, summary_1=summary_1).query
+hop2_docs = self.retrieve_k(hop2_query).passages summary_2 = self.summarize2(claim=claim, context=
+summary_1 , passages=hop2_docs).summary
+# HOP 3
+hop3_query = self.create_query_hop3(claim=claim, summary_1=summary_1 , summary_2=summary_2).query
+hop3_docs = self.retrieve_k(hop3_query).passages
+return dspy.Prediction(retrieved_docs = hop1_docs + hop2_docs + hop3_docs)")
+
+
+
+
+
+
+
+class IrisSig(dspy.Signature):
+"Given the petal and sepal dimensions in cm, predict the
+iris species."
+ petal_length = dspy.InputField() 5 petal_width = dspy.InputField()
+ sepal_length = dspy.InputField() sepal_width = dspy.InputField()
+answer = dspy.OutputField(desc='setosa ,
+virginica')
+
+
+class Classify(dspy.Module): def __init__(self):
+def __init__(self):
+self.pred = dspy.ChainOfThought(IrisSig)
+def forward(self, petal_length, petal_width, sepal_length, sepal_width):
+return self.pred(petal_length=petal_length , petal_width= petal_width , sepal_length=sepal_length , sepal_width= sepal_width)
+
+
+
+
+
+
+class HeartDiseaseInput(dspy.Signature):
+age = dspy.InputField(desc="Age in years")
+sex = dspy.InputField(desc="Sex (male or female)")
+cp = dspy.InputField(desc="Chest pain type (typical angina
+, atypical angina, non-anginal pain, asymptomatic)") trestbps = dspy.InputField(desc="Resting blood pressure (
+in mm Hg on admission to the hospital)")
+chol = dspy.InputField(desc="Serum cholestoral in mg/dl") fbs = dspy.InputField(desc="Fasting blood sugar > 120 mg/
+dl (true or false)")
+restecg = dspy.InputField(desc="Resting
+electrocardiographic results (normal, ST-T wave
+abnormality , left ventricular hypertrophy)") thalach = dspy.InputField(desc="Maximum heart rate
+achieved")
+exang = dspy.InputField(desc="Exercise induced angina (yes
+or no)")
+oldpeak = dspy.InputField(desc="ST depression induced by
+exercise relative to rest")
+slope = dspy.InputField(desc="The slope of the peak
+exercise ST segment (upsloping, flat, downsloping)") ca = dspy.InputField(desc="Number of major vessels (0-3)
+colored by flourosopy")
+thal = dspy.InputField(desc="Thalassemia (normal , fixed
+defect , reversible defect)")
+
+
+
+
+
+class HeartDiseaseSignature(HeartDiseaseInput):
+answer = dspy.OutputField(desc="Does this heart disease? Just yes or no.")
+
+
+
+
+
+class HeartDiseaseVote(HeartDiseaseInput): """ Given patient information , predict the
+presence of
+patient have
+presence of heart disease. I can critically assess the provided
+trainee opinions."""
+context = dspy.InputField(desc="A list of opinions from trainee doctors.")
+answer = dspy.OutputField(desc="Does this patient have heart disease? Just yes or no.")
+
+
+
+
+class Classify(dspy.Module): def __init__(self):
+self.classify = [dspy.ChainOfThought( HeartDiseaseSignature , temperature=0.7 in range(3)]
++ i*0.01)
+for
+i
+self.vote = dspy.ChainOfThought(HeartDiseaseVote)
+def forward(self, age, sex, cp, trestbps, chol, fbs, restecg, thalach, exang, oldpeak, slope, ca, thal):
+kwargs = dict(age=age, sex=sex, cp=cp, trestbps=trestbps , chol=chol, fbs=fbs, restecg=restecg,
+thalach=thalach, exang=exang, oldpeak=oldpeak, slope=slope, ca=ca, thal=thal)
+opinions = [c(**kwargs) for c in self.classify]
+opinions = [(opinion.rationale.replace('\n', ' ').strip(
+'.'), opinion.answer.strip('.')) for opinion in
+opinions]
+opinions = [f"I'm a trainee doctor, trying to {reason}.
+Hence, my answer is {answer}." for reason, answer in
+opinions]
+return self.vote(context=opinions , **kwargs)
+
+
+
+
+
+
+class InferRetrieveRank(dspy.Module):
+def __init__(self, infer_sig, rank_sig, retr):
+# Initialize LM modules with Signatures
+self.infer = dspy.ChainOfThought(infer_sig) self.rank = dspy.ChainOfThrought(rank_sig) self.retrieve = retr
+def forward(self, text: str) -> Prediction:
+# Predict with LM
+preds = self.infer(text).completions.labels
+# Parse LM output
+preds = extract_labels_from_strings(preds)
+# Use LM outputs to retrieve labels
+labels = self.retrieve(preds)
+# Use LM to rerank labels
+labels = self.rank(text, labels) return dspy.Prediction(labels=labels)
+
+
+
+
+
+
+class BiodexRankSignature(dspy.Signature):
+""" Given a snippet from a medical article ,
+pick the 10 most applicable adverse reactions from the options that are directly expressed in the snippet."""
+text = dspy.InputField(prefix="Article:") options = dspy.InputField(
+prefix="Options:",
+desc="List of comma-separated options to choose from")
+
+output = dspy.OutputField( prefix="Reactions:",
+desc="list of comma-separated adverse
+drug reactions"
+)
+
+
+
+
+class EscoInferSignature(dspy.Signature): """ Given a snippet from a job vacancy ,
+identify all the ESCO job skills mentioned. Always return skills."""
+text = dspy.InputField(prefix="Vacancy:") options = dspy.InputField(
+prefix="Options:",
+desc="List of comma-separated options to choose from"
+output = dspy.OutputField(
+prefix="Skills:",
+desc="list of comma-separated ESCO skills"
+)
+
+
+
+class EscoRankSignature(dspy.Signature):
+""" Given a snippet from a job vacancy , pick
+the 10 most applicable skills from the options that are directly expressed in the snippet."""
+text = dspy.InputField(prefix="Vacancy:") options = dspy.InputField(
+prefix="Options:",
+desc="List of comma-separated options to choose from")
+output = dspy.OutputField(
+prefix="Skills:",
+desc="list of comma-separated ESCO skills"
+)
+
+
+
+class RAG(dspy.Module):
+def __init__(self, num_passages=3):
+# ‘Retrieve‘ will use the user’s default retrieval settings unless overriden.
+self.retrieve = dspy.Retrieve(k=num_passages)
+# ‘ChainOfThought‘ with signature that generates answers given retrieval & question. 
+self.generate_answer = dspy.ChainOfThought("context , question -> answer")
+def forward(self, question):
+context = self.retrieve(question).passages
+return self.generate_answer(context=context , question=question)
+
+
+class BasicQA(dspy.Signature):
+    """Answer questions with short factoid answers."""
+
+    question = dspy.InputField()
+    answer = dspy.OutputField(desc="often between 1 and 5 words")
+class BasicQABot(dspy.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.generate = dspy.Predict(BasicQA)
+
+    def forward(self,question):
+        prediction = self.generate(question = question)
+        return dspy.Prediction(answer = prediction.answer)
+
+
+
+
+
+class SearchQASignature(dspy.Signature):
+    """You will be given a question. Your task is to answer the question."""
+    
+    question: str = dspy.InputField(
+        prefix="Question:",
+        desc="question to ask",
+        format=lambda x: x.strip(),
+    )
+    answer: str = dspy.OutputField(
+        prefix="Answer:",
+        desc="answer to the question",
+    )
+
+class ArxivQASignature(dspy.Signature):
+    """You will be given a question and an Arxiv Paper ID. Your task is to answer the question."""
+    
+    question: str = dspy.InputField(
+        prefix="Question:",
+        desc="question to ask",
+        format=lambda x: x.strip(),
+    )
+    paper_id: str = dspy.InputField(
+        prefix="Paper ID:",
+        desc="Arxiv Paper ID",
+    )
+    answer: str = dspy.OutputField(
+        prefix="Answer:",
+        desc="answer to the question",
+    )
+
+
+
+
+class PythonCode(pydantic.BaseModel):
+    code: str
+
+    @pydantic.field_validator('code')
+    def check_syntax(cls, v):
+        try:
+            # Attempt to compile the code snippet
+            compile(v, "<string>", "exec")
+        except SyntaxError as e:
+            # If a SyntaxError is raised, the code is not syntactically valid
+            raise ValueError(f"Code is not syntactically valid: {e}")
+            
+        return v
+
+# The signature is the main DSpy object. Note that we have types for the input and output fields,
+# which was not possible beofore.
+class CodeSignature(Signature):
+    prompt: PythonCode = InputField()
+    test: PythonCode = InputField()
+    entry_point: str = InputField()
+    solution: PythonCode = OutputField()
+
+
+
+
+
+
+
+
+
+class GenerateSearchQuery(dspy.Signature):
+    """Write a simple search query that will help answer a complex question."""
+
+    context:list[str] = dspy.InputField(desc="may contain relevant facts")
+    question = dspy.InputField()
+    query = dspy.OutputField()
+
+class GenerateAnswer(dspy.Signature):
+    """Answer questions with short factoid answers."""
+
+    context:list[str] = dspy.InputField(desc="may contain relevant facts")
+    question = dspy.InputField()
+    answer = dspy.OutputField(desc="often between 1 and 5 words")
+
+from dsp.utils import deduplicate
+
+class SimplifiedBaleen(dspy.Module):
+    def __init__(self, passages_per_hop=3, max_hops=2):
+        super().__init__()
+
+        self.generate_query = [dspy.TypedChainOfThought(GenerateSearchQuery) for _ in range(max_hops)]
+        self.retrieve = dspy.Retrieve(k=passages_per_hop)
+        self.generate_answer = dspy.TypedChainOfThought(GenerateAnswer)
+        self.max_hops = max_hops
+    
+    def forward(self, question):
+        context = []
+        
+        for hop in range(self.max_hops):
+            query = self.generate_query[hop](context=context, question=question).query
+            passages = self.retrieve(query).passages
+            context = deduplicate(context + passages)
+
+        pred = self.generate_answer(context=context, question=question)
+        return dspy.Prediction(context=context, answer=pred.answer)
+
+
+class CoT(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.prog = dspy.ChainOfThought("question -> answer")
+    
+    def forward(self, question):
+        return self.prog(question=question)
+
+
+
+class SimpleMathSignature(dspy.Signature):
+    """Answer the math question."""
+
+    question = dspy.InputField(desc="A simple math question.")
+    answer = dspy.OutputField(desc="The answer to the math question.")
+
+
+
+class SimpleMathSolver(dspy.Module):
+    def __init__(self):
+        self.prog = dspy.ChainOfThought("question -> answer")
+
+    def forward(self, question):
+        pred = self.prog(question=question)
+        return pred
+
+simple_math_solver = SimpleMathSolver()
+
+
+
+
+def extract_number(question):
+    numbers = [int(s) for s in question.split() if s.isdigit()]
+    return numbers
+
+def has_numbers(rationale, numbers):
+    for number in numbers:
+        if str(number) not in rationale:
+            return False, number
+    return True, None
+
+class SimpleMathSolverWithSuggest(dspy.Module):
+    def __init__(self):
+        self.prog = dspy.ChainOfThought("question -> answer")
+
+    def forward(self, question):
+        pred = self.prog(question=question)
+        rationale_has_numbers, missing_number = has_numbers(pred.rationale, extract_number(question))
+        dspy.Suggest(rationale_has_numbers, f"Your Reasoning should contain {missing_number}.")
+        dspy.Suggest(len(pred.answer) < 10, "Your Answer should be a number.")
+        return pred
+
+simple_math_solver_suggest = SimpleMathSolverWithSuggest().activate_assertions()
+
+
+
+
+class ScoNeSignature(dspy.Signature):
+    ("""You are given some context (a premise) and a question (a hypothesis). """
+    """You must indicate with Yes/No answer whether we can logically """
+    """conclude the hypothesis from the premise.""")
+
+    context = dspy.InputField()
+    question = dspy.InputField()
+    answer = dspy.OutputField(desc="Yes or No")
+class ScoNeCoT(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.generate_answer = dspy.ChainOfThought(ScoNeSignature)
+
+    def forward(self, context, question):
+        return self.generate_answer(context=context, question=question)
+
+
+
+class ScoNeSignature(dspy.Signature):
+    ("""context, question -> answer""")
+
+    context = dspy.InputField()
+    question = dspy.InputField()
+    answer = dspy.OutputField(desc="Yes or No")
+
+class ScoNeCoT(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.generate_answer = dspy.ChainOfThought(ScoNeSignature)
+
+    def forward(self, context, question):
+        return self.generate_answer(context=context, question=question)
+
+
+
+class PlagiarismSignature(dspy.Signature):
+    # Clarify something about the nature of the task (expressed below as a docstring)! 
+    """Detect if two code samples are plagiarized. In plagiarized field answer only : Yes if the code samples are plagiarized, No otherwise. In explanation field add the reason why the code samples are/ are not plagiarized."""
+
+    # Supply hints on the nature of an input field, expressed as a desc keyword argument for dspy.InputField.
+    code_sample_1 = dspy.InputField(desc="The first code sample to compare")
+    code_sample_2 = dspy.InputField(desc="The second code sample to compare")
+
+    # Supply constraints on an output field, expressed as a desc keyword argument for dspy.OutputField.
+    explanation = dspy.OutputField(
+        desc="Explanation or reason why the code samples are/ are not plagiarized"
+    )
+    plagiarized = dspy.OutputField(
+        desc="Yes/No indicating if code samples are plagiarized"
+    )
+
+
+class PlagiarismCoT(dspy.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+        # self.prog = dspy.ChainOfThought(PlagiarismSignature)
+        self.prog = dspy.Predict(PlagiarismSignature)
+
+    def forward(self, code_sample_1: str, code_sample_2: str) -> PlagiarismSignature:
+
+        # here you can do any processing you want, calling your function, etc.
+        # modifying your code, inputs etc.
+        # similar to pytorch forward function
+
+        # returned signature object 
+        prediction = self.prog(code_sample_1=code_sample_1, code_sample_2=code_sample_2)
+        return prediction
+
+
+
+
+
+
+from dsp.utils import deduplicate
+
+class GenerateSearchQuery(dspy.Signature):
+    """Write a simple search query that will help answer a complex question."""
+    context = dspy.InputField(desc="may contain relevant facts")
+    question = dspy.InputField()
+    query = dspy.OutputField()
+
+class GenerateCitedParagraph(dspy.Signature):
+    """Generate a paragraph with citations."""
+    context = dspy.InputField(desc="may contain relevant facts")
+    question = dspy.InputField()
+    paragraph = dspy.OutputField(desc="includes citations")
+
+class LongFormQA(dspy.Module):
+    def __init__(self, passages_per_hop=3, max_hops=2):
+        super().__init__()
+        self.generate_query = [dspy.ChainOfThought(GenerateSearchQuery) for _ in range(max_hops)]
+        self.retrieve = dspy.Retrieve(k=passages_per_hop)
+        self.generate_cited_paragraph = dspy.ChainOfThought(GenerateCitedParagraph)
+        self.max_hops = max_hops
+    
+    def forward(self, question):
+        context = []
+        for hop in range(self.max_hops):
+            query = self.generate_query[hop](context=context, question=question).query
+            passages = self.retrieve(query).passages
+            context = deduplicate(context + passages)
+        pred = self.generate_cited_paragraph(context=context, question=question)
+        pred = dspy.Prediction(context=context, paragraph=pred.paragraph)
+        return pred
+
+
+
+
+
+
+class GenerateAnswer(dspy.Signature):
+    """Answer questions with short factoid answers."""
+
+    context = dspy.InputField(desc="may contain relevant facts")
+    question = dspy.InputField()
+    answer = dspy.OutputField(desc="often between 1 and 5 words")
+
+
+class GenerateSearchQuery(dspy.Signature):
+    """Write a simple search query that will help answer a complex question."""
+
+    context = dspy.InputField(desc="may contain relevant facts")
+    question = dspy.InputField()
+    query = dspy.OutputField()
+
+
+
+
+class SimplifiedBaleenAssertions(dspy.Module):
+    def __init__(self, passages_per_hop=2, max_hops=2):
+        super().__init__()
+        self.generate_query = [dspy.ChainOfThought(GenerateSearchQuery) for _ in range(max_hops)]
+        self.retrieve = dspy.Retrieve(k=passages_per_hop)
+        self.generate_answer = dspy.ChainOfThought(GenerateAnswer)
+        self.max_hops = max_hops
+
+        # for evaluating assertions only
+        self.passed_suggestions = 0
+
+    def forward(self, question):
+        context = []
+        prev_queries = [question]
+
+        for hop in range(self.max_hops):
+            query = self.generate_query[hop](context=context, question=question).query
+
+            dspy.Suggest(
+                len(query) <= 100,
+                "Query should be short and less than 100 characters",
+            )
+
+            dspy.Suggest(
+                validate_query_distinction_local(prev_queries, query),
+                "Query should be distinct from: "
+                + "; ".join(f"{i+1}) {q}" for i, q in enumerate(prev_queries)),
+            )
+
+            prev_queries.append(query)
+            passages = self.retrieve(query).passages
+            context = deduplicate(context + passages)
+        
+        if all_queries_distinct(prev_queries):
+            self.passed_suggestions += 1
+
+        pred = self.generate_answer(context=context, question=question)
+        pred = dspy.Prediction(context=context, answer=pred.answer)
+        return pred
+
+
+
+
+class BasicMH(dspy.Module):
+    def __init__(self, passages_per_hop=3):
+        super().__init__()
+
+        self.retrieve = dspy.Retrieve(k=passages_per_hop)
+        self.generate_query = [dspy.ChainOfThought("context, question -> search_query") for _ in range(2)]
+        self.generate_answer = dspy.ChainOfThought("context, question -> answer")
+    
+    def forward(self, question):
+        context = []
+        
+        for hop in range(2):
+            search_query = self.generate_query[hop](context=context, question=question).search_query
+            passages = self.retrieve(search_query).passages
+            context = deduplicate(context + passages)
+
+        return self.generate_answer(context=context, question=question).copy(context=context)
+
+
+
+
+# Define the signature for automatic assessments.
+class Assess(dspy.Signature):
+    """Assess the quality of a tweet along the specified dimension."""
+
+    context = dspy.InputField(desc='ignore if N/A')
+    assessed_text = dspy.InputField()
+
+
+
+
+
+class GenerateSearchQuery(dspy.Signature):
+    """Write a simple search query that will help answer a complex question."""
+    context = dspy.InputField(desc="may contain relevant facts")
+    question = dspy.InputField()
+    query = dspy.OutputField()
+
+class GenerateTweet(dspy.Signature):
+    """Generate an engaging tweet that effectively answers a question staying faithful to the context, is less than 280 characters, and has no hashtags."""
+    question = dspy.InputField()
+    context = dspy.InputField(desc="may contain relevant facts")
+    tweet = dspy.OutputField()
+
+class Tweeter(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.generate_tweet = dspy.ChainOfThought(GenerateTweet)
+
+    def forward(self, question, answer):
+        context = []
+        max_hops=2
+        passages_per_hop=3
+        generate_query = [dspy.ChainOfThought(GenerateSearchQuery) for _ in range(max_hops)]
+        retrieve = dspy.Retrieve(k=passages_per_hop)
+        for hop in range(max_hops):
+            query = generate_query[hop](context=context, question=question).query
+            passages = retrieve(query).passages
+            context = deduplicate(context + passages)
+        generated_tweet = self.generate_tweet(question=question, context=context).tweet
+        return dspy.Prediction(generated_tweet=generated_tweet, context=context)
+    
+class AssessTweet(dspy.Signature):
+    """Assess the quality of a tweet along the specified dimension."""
+
+    context = dspy.InputField(desc='ignore if N/A')
+    assessed_text = dspy.InputField()
+    assessment_question = dspy.InputField()
+    assessment_answer = dspy.OutputField(desc="Yes or No")
+
+
+
+
+class TweeterWithAssertions(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.generate_tweet = dspy.ChainOfThought(GenerateTweet)
+
+    def forward(self, question, answer):
+        context = []
+        max_hops=2
+        passages_per_hop=3
+        generate_query = [dspy.ChainOfThought(GenerateSearchQuery) for _ in range(max_hops)]
+        retrieve = dspy.Retrieve(k=passages_per_hop)
+        for hop in range(max_hops):
+            query = generate_query[hop](context=context, question=question).query
+            passages = retrieve(query).passages
+            context = deduplicate(context + passages)
+        generated_tweet = self.generate_tweet(question=question, context=context).tweet
+        dspy.Suggest(has_no_hashtags(generated_tweet), "Please revise the tweet to remove hashtag phrases following it.", target_module=GenerateTweet)
+        dspy.Suggest(is_within_length_limit(generated_tweet, 280), f"Please ensure the tweet is within {280} characters.", target_module=GenerateTweet)
+        dspy.Suggest(has_correct_answer(generated_tweet, answer), "The tweet does not include the correct answer to the question. Please revise accordingly.", target_module=GenerateTweet)
+        engaging_question = "Does the assessed text make for a self-contained, engaging tweet? Say no if it is not engaging."
+        engaging_assessment = dspy.Predict(AssessTweet)(context=context, assessed_text=generated_tweet, assessment_question=engaging_question)
+        dspy.Suggest(is_assessment_yes(engaging_assessment.assessment_answer), "The text is not engaging enough. Please revise to make it more captivating.", target_module=GenerateTweet)
+        faithful_question = "Is the assessed text grounded in the context? Say no if it includes significant facts not in the context."
+        faithful_assessment = dspy.Predict(AssessTweet)(context='N/A', assessed_text=generated_tweet, assessment_question=faithful_question)
+        dspy.Suggest(is_assessment_yes(faithful_assessment.assessment_answer), "The text contains unfaithful elements or significant facts not in the context. Please revise for accuracy.", target_module=GenerateTweet)
+        return dspy.Prediction(generated_tweet=generated_tweet, context=context)
+
+tweeter_with_assertions = assert_transform_module(TweeterWithAssertions().map_named_predictors(Retry), backtrack_handler) 
+
+
+
+class SQLTableMetadata(dspy.Signature):
+    """Give a suitable table name and description about the given table"""
+    pandas_dataframe_str = dspy.InputField(desc="First 10 rows of a pandas dataframe delimited by newline character")
+    table_name = dspy.OutputField(desc="suitable table name")
+    table_summary = dspy.OutputField(desc="a summary about the table")
+
+class CoT(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.prog = dspy.ChainOfThought(SQLTableMetadata)
+    
+    def forward(self, pandas_dataframe_str):
+        return self.prog(pandas_dataframe_str=pandas_dataframe_str)
+
+
+
+
+
+
+# DSPy signature for converting text to SQL query
+class TextToSQLAnswer(dspy.Signature):
+    """Convert natural language text to SQL using suitable schema(s) from multiple schema choices"""
+
+    question:str = dspy.InputField(desc="natural language input which will be converted to SQL")
+    relevant_table_schemas_rows:str = dspy.InputField(desc="Multiple possible tables which has table name and corresponding columns, along with relevant rows from the table (values in the same order as columns above)")
+    sql:str = dspy.OutputField(desc="Generate syntactically correct sqlite query with correct column names using suitable tables(s) and its rows.\n Don't forget to add distinct.\n Please rename the returned columns into suitable names.\n DON'T OUTPUT anything else other than the sqlite query")
+
+# DSPy signature for converting SQL query and question to natural language text
+class SQLReturnToAnswer(dspy.Signature):
+    """Answer the question using the rows from the SQL query"""
+    question:str = dspy.InputField()
+    sql:str = dspy.InputField(desc="sqlite query that generated the rows")
+    relevant_rows:str = dspy.InputField(desc="relevant rows to answer the question")
+    answer:str = dspy.OutputField(desc="answer to the question using relevant rows and the sql query")
+
+# If there is an SQLError, then rectify the error by trying again
+class SQLRectifier(dspy.Signature):
+    """Correct the SQL query to resolve the error using the proper table names, columns and rows"""  
+    input_sql:str = dspy.InputField(desc="sqlite query that needs to be fixed")
+    error_str: str = dspy.InputField(desc="error that needs to be resolved")
+    relevant_table_schemas_rows:str = dspy.InputField(desc="Multiple possible tables which has table name and corresponding columns, along with relevant rows from the table (values in the same order as columns above)")
+    sql:str = dspy.OutputField(desc="corrected sqlite query to resolve the error and remove and any invalid syntax in the query.\n Don't output anything else other than the sqlite query")
+
+
+
+
+
+
+class TextToSQLQueryModule(dspy.Module):
+    """Text to SQL to final module"""
+    def __init__(self,region:str,use_cot:bool=True,max_retries:int=3):
+        """Text to Answer init module
+
+        Args:
+            region (str): Region for which the module will be used.
+            use_cot (bool, optional): Whether to use chain of thought for sql query generation. Defaults to True.
+            max_retries (int, optional): Number of max retries for SQLError. Defaults to 3.
+        """
+        super().__init__()
+        self.region = region
+        db,table_collection,row_collection = db_collection_dict[region]
+        # print(db,table_collection,row_collection)
+        self.table_collection = table_collection
+        self.use_cot = use_cot
+        self.db = db
+        self.row_collection = row_collection
+        if self.use_cot == True:
+            self.sqlAnswer = dspy.ChainOfThought(TextToSQLAnswer)
+        else:
+            self.sqlAnswer = dspy.Predict(TextToSQLAnswer)
+        self.final_output = dspy.Predict(SQLReturnToAnswer)
+        self.max_tries = max_retries
+        # Initialize the sql rectifier with CoT reasoning
+        self.sql_rectifier = dspy.ChainOfThought(SQLRectifier,rationale_type=dspy.OutputField(
+            prefix="Reasoning: Let's think step by step in order to",
+            desc="${produce the answer}. We ..."
+        ))
+    
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self.forward(*args, **kwargs)
+        
+    def forward(self,question):
+        # Embed the question with embedding function
+        question_emb = emb_fn([question])[0]
+        # Retrieve the relevant tables from table schema and table summary
+        docs = self.table_collection.query(
+            query_embeddings = question_emb,
+            n_results = 5
+        )
+        # docs = get_table_results(db_collection_dict[self.region][1],question)
+        relevant_rows_schemas = ""
+    
+        existing_table_names = []
+
+        for table_idx,metadata_name in enumerate(docs['metadatas'][0]):
+            table_metadata = metadata_name['table_metadata']
+            table_name = metadata_name['table_name']
+            # If the table name is already in the list of existing table names, skip it
+            # if table_name in existing_table_names: 
+            #     continue
+            existing_table_names.append(table_name)
+            # Retrieve the relevant rows from the current table
+            rows = self.row_collection.query(
+                query_embeddings = question_emb,
+                n_results = 5,
+                # where clause to filter the rows
+                where = {"table_name":table_name}
+            )
+            # Retrieve the relevant table with the schema and summary
+            relevant_rows_schemas += f'Table name: {table_name} \n'
+            relevant_rows_schemas += "/* \n"
+            for match in re.finditer("columns: ",table_metadata):
+                cols_end = match.end()
+            relevant_rows_schemas += "col : " + " | ".join(table_metadata[cols_end:].split(", ")) + "\n"
+            for row_idx,row in enumerate(rows['metadatas'][0]):
+                # Get the relevant rows from the current table
+                # relevant_rows_schemas += f'\tRow {row_idx+1} from table {table_name}: {row["full_rows"]}\n'
+                relevant_rows_schemas += f'row {row_idx+1} : {" | ".join(row["full_rows"].split(", "))}\n'
+            relevant_rows_schemas += "*/" + '\n\n'
+        print(colored(relevant_rows_schemas,"yellow"))
+        # return 
+        sql_query = self.sqlAnswer(question=question,relevant_table_schemas_rows=relevant_rows_schemas)
+
+        num_tries = 0
+        print(sql_query)
+        while num_tries <= self.max_tries:
+            with self.db.connect() as conn:
+                try:
+                    # Try executing the sql query for the database
+                    result = conn.execute(text(process_sql_str(sql_query.sql)))
+                    num_tries = self.max_tries + 1
+                except Exception as error:
+                    # If there is an sql error, then try again with the sql rectifier
+                    print(colored(str(error),'red'))
+                    sql_query = self.sql_rectifier(input_sql=sql_query.sql,error_str=str(error),relevant_table_schemas_rows=relevant_rows_schemas)
+                    print(colored(sql_query.rationale,'green'))
+                    print()
+                    print(colored(sql_query.sql,'green'))
+                    # If all the num_retries are exhausted, then exit the program
+                    num_tries += 1
+                    if num_tries == self.max_tries+1:
+                        return sql_query,error
+        # With the retrieved rows from the database, then try to answer the question with dspy context
+        with dspy.context(lm=sql_to_answer):
+            row_str = ""
+            key = tuple(result.keys())
+            for row in result.fetchall():
+                for r,k in zip(row,key):
+                    row_str += f" {k} = {r},"
+                row_str = row_str[:-1]
+                row_str += "\n"
+            print(f"Extracted rows: {row_str}")
+            final_answer = self.final_output(question=question,sql=sql_query.sql,relevant_rows=row_str)
+            return final_answer
+
+class SyntheticFact(BaseModel):
+    fact: str = Field(..., description="a statement")
+    varacity: bool = Field(..., description="is the statement true or false")
+
+class ExampleSignature(dspy.Signature):
+    """Generate an example of a synthetic fact."""
+    fact: SyntheticFact = dspy.OutputField()
+
+
+
+
+class GenerateAnswerChoices(dspy.Signature):
+    """Generate answer choices in JSON format that include the correct answer and plausible distractors for the specified question."""
+    question = dspy.InputField()
+    correct_answer = dspy.InputField()
+    number_of_choices = dspy.InputField()
+    answer_choices = dspy.OutputField(desc='JSON key-value pairs')
+
+class QuizAnswerGenerator(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.generate_choices = dspy.ChainOfThought(GenerateAnswerChoices)
+
+    def forward(self, question, answer):
+        choices = self.generate_choices(question=question, correct_answer=answer, number_of_choices=number_of_choices).answer_choices
+        return dspy.Prediction(choices = choices)
+
+
+
+
+
+
+class AssessQuizChoices(dspy.Signature):
+    """Assess the quality of quiz answer choices along specified dimensions."""
+    
+    question = dspy.InputField()
+    answer_choices = dspy.InputField()
+    assessment_question = dspy.InputField()
+    assessment_answer = dspy.OutputField(desc="Yes or No")
+    
+
+
+
+class QuizAnswerGeneratorWithAssertions(dspy.Module):
+    def __init__(self):
+        super().__init__()
+        self.generate_choices = dspy.ChainOfThought(GenerateAnswerChoices)
+
+    def forward(self, question, answer):
+        choice_string = self.generate_choices(question=question, correct_answer=answer, number_of_choices=number_of_choices).answer_choices
+        dspy.Suggest(format_checker(choice_string), "The format of the answer choices should be in JSON format. Please revise accordingly.", target_module=GenerateAnswerChoices)
+        dspy.Suggest(is_correct_answer_included(answer, choice_string), "The answer choices do not include the correct answer to the question. Please revise accordingly.", target_module=GenerateAnswerChoices)
+        plausibility_question = "Are the distractors in the answer choices plausible and not easily identifiable as incorrect?"
+        plausibility_assessment = dspy.Predict(AssessQuizChoices)(question=question, answer_choices=choice_string, assessment_question=plausibility_question)
+        dspy.Suggest(is_plausibility_yes(plausibility_assessment.assessment_answer), "The answer choices are not plausible distractors or are too easily identifiable as incorrect. Please revise to provide more challenging and plausible distractors.", target_module=GenerateAnswerChoices)
+        return dspy.Prediction(choices = choice_string)
+
+
+
+
+
+
+class SimplifiedBaleenAssertions(dspy.Module):
+    def __init__(self, passages_per_hop=2, max_hops=2):
+        super().__init__()
+        self.generate_query = [dspy.ChainOfThought(GenerateSearchQuery) for _ in range(max_hops)]
+        self.retrieve = dspy.Retrieve(k=passages_per_hop)
+        self.generate_answer = dspy.ChainOfThought(GenerateAnswer)
+        self.max_hops = max_hops
+
+    def forward(self, question):
+        context = []
+        prev_queries = [question]
+
+        for hop in range(self.max_hops):
+            query = self.generate_query[hop](context=context, question=question).query
+
+            dspy.Suggest(
+                len(query) <= 100,
+                "Query should be short and less than 100 characters",
+            )
+
+            dspy.Suggest(
+                validate_query_distinction_local(prev_queries, query),
+                "Query should be distinct from: "
+                + "; ".join(f"{i+1}) {q}" for i, q in enumerate(prev_queries)),
+            )
+
+            prev_queries.append(query)
+            passages = self.retrieve(query).passages
+            context = deduplicate(context + passages)
+        
+        if all_queries_distinct(prev_queries):
+            self.passed_suggestions += 1
+
+        pred = self.generate_answer(context=context, question=question)
+        pred = dspy.Prediction(context=context, answer=pred.answer)
+        return pred
+
+
+
+
+
+
+class Evaluator(dspy.Signature):
+    """Please act as an impartial judge and evaluate the quality of the responses provided by multiple AI assistants to the user question displayed below. You should choose the assistant that offers a better user experience by interacting with the user more effectively and efficiently, and providing a correct final response to the user's question.
+    
+Rules:
+1. Avoid Position Biases: Ensure that the order in which the responses were presented does not influence your decision. Evaluate each response on its own merits.
+2. Length of Responses: Do not let the length of the responses affect your evaluation. Focus on the quality and relevance of the response. A good response is targeted and addresses the user's needs effectively, rather than simply being detailed.
+3. Objectivity: Be as objective as possible. Consider the user's perspective and overall experience with each assistant."""
+    
+    question: str = dspy.InputField(
+        prefix="Question:",
+        desc="question to ask",
+    )
+    reference_answer: str = dspy.InputField(
+        prefix="Reference Answer:",
+        desc="Answer to the question given by the model.",
+    )
+    answer: str = dspy.InputField(
+        prefix="Answer:",
+        desc="Answer to the question given by the model.",
+    )
+    rationale: str = dspy.OutputField(
+        prefix="Rationale:",
+        desc="Explanation of why the answer is correct or incorrect.",
+    )
+    is_correct: bool = dspy.OutputField(
+        prefix="Correct:",
+        desc="Whether the answer is correct.",
+    )
+
+
+
+
+
+
+class SearchQASignature(dspy.Signature):
+    """You will be given a question. Your task is to answer the question."""
+    
+    question: str = dspy.InputField(
+        prefix="Question:",
+        desc="question to ask",
+        format=lambda x: x.strip(),
+    )
+    answer: str = dspy.OutputField(
+        prefix="Answer:",
+        desc="answer to the question",
+    )
+
+class ArxivQASignature(dspy.Signature):
+    """You will be given a question and an Arxiv Paper ID. Your task is to answer the question."""
+    
+    question: str = dspy.InputField(
+        prefix="Question:",
+        desc="question to ask",
+        format=lambda x: x.strip(),
+    )
+    paper_id: str = dspy.InputField(
+        prefix="Paper ID:",
+        desc="Arxiv Paper ID",
+    )
+    answer: str = dspy.OutputField(
+        prefix="Answer:",
+        desc="answer to the question",
+    )
+
+
+
+
+
+class EvalResult(BaseModel):
+    example: dict
+    score: float
+    actions: Optional[List[ActionOutput]] = None
+
+
+class Comparator(dspy.Signature):
+    """After executing the given actions on user inputs using the given instruction, some inputs have yielded good, results, while others have not. I'll provide you the inputs along with their, corresponding evaluation metrics:
+
+Task:
+(1) Firstly, identify and contrast the patterns of inputs that have achieved good results with those that have not.
+(2) Then, review the computational logic for any inconsistencies in the previous actions.
+(3) Lastly, specify the modification in tools used that can lead to improved performance on the negative inputs."""
+
+    instruction: str = dspy.InputField(
+        prefix="Instruction: ",
+        desc="Instruction for the actor to execute the task",
+    )
+    actions: List[str] = dspy.InputField(
+        prefix="Actions: ",
+        desc="Actions actor can take to complete the task",
+    )
+    pos_input_with_metrics: List[EvalResult] = dspy.InputField(
+        prefix="Positive Inputs: ",
+        desc="Positive inputs along with their score on a evaluation metric and actions taken",
+    )
+    neg_input_with_metrics: List[EvalResult] = dspy.InputField(
+        prefix="Negative Inputs: ",
+        desc="Negative inputs along with their score on a evaluation metric and actions taken",
+    )
+    feedback: str = dspy.OutputField(
+        prefix="Feedback: ",
+        desc="Feedback for the actor to improve the performance of negative inputs",
+    )
+
+
+class FeedbackBasedInstruction(dspy.Signature):
+    """There is a task that needs to be completed for which one can use multiple tools to achieve the desired outcome. A group's performance was evaluated on a dataset of inputs, the inputs that did well are positive inputs, and the inputs that did not do well are negative inputs.
+
+You received feedback on how they can better use the tools to improve your performance on the negative inputs. You have been provided with the previous instruction, that they followed to use tools to complete the task, and the feedback on your performance.
+
+Your task is to incorporate the feedback and generate a detailed instruction for the group to follow to improve their performance on the task.
+
+Make sure that the new instruction talks about how to use the tools effectively and should be no more than 3 paragraphs long. The previous instruction contains general guidelines that you must retain in the new instruction."""
+
+    previous_instruction: str = dspy.InputField(
+        prefix="Previous Instruction: ",
+        desc="Previous instruction for the actor to execute the task",
+    )
+    feedback: str = dspy.InputField(
+        prefix="Feedback: ",
+        desc="Feedback for the actor to improve the performance of negative inputs",
+    )
+    new_instruction: str = dspy.OutputField(
+        prefix="New Instruction: ",
+        desc="New instruction for the actor to execute the task",
+    )
+
+
+
+
+
+class PythonCode(pydantic.BaseModel):
+    code: str
+
+    @pydantic.field_validator('code')
+    def check_syntax(cls, v):
+        try:
+            # Attempt to compile the code snippet
+            compile(v, "<string>", "exec")
+        except SyntaxError as e:
+            # If a SyntaxError is raised, the code is not syntactically valid
+            raise ValueError(f"Code is not syntactically valid: {e}")
+            
+        return v
+
+# The signature is the main DSpy object. Note that we have types for the input and output fields,
+# which was not possible beofore.
+class CodeSignature(Signature):
+    prompt: PythonCode = InputField()
+    test: PythonCode = InputField()
+    entry_point: str = InputField()
+    solution: PythonCode = OutputField()
+
+predictor = TypedPredictor(CodeSignature)
+
+
+
+
