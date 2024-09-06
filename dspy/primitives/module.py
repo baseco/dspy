@@ -105,10 +105,7 @@ class BaseModule:
         return copy.deepcopy(self)
 
     def reset_copy(self):
-        try:
-            obj = custom_deepcopy(self)
-        except (AttributeError) as e:
-            obj = copy.deep(self)
+        obj = copy.deepcopy(self)
 
         for param in obj.parameters():
             param.reset()
@@ -137,67 +134,6 @@ class BaseModule:
     def load(self, path):
         with open(path) as f:
             self.load_state(ujson.loads(f.read()))
-
-
-import copy
-
-def custom_deepcopy(obj, memo=None):
-    if memo is None:
-        memo = {}
-
-    # Check if the object is already copied to handle recursive references
-    if id(obj) in memo:
-        return memo[id(obj)]
-
-    # Check if the object is a primitive type and return it directly
-    if isinstance(obj, (int, float, bool, str, tuple, frozenset, bytes, type(None))):
-        return obj
-
-    # Check if the object is a list or dict and handle them differently
-    if isinstance(obj, list):
-        copied_list = [custom_deepcopy(item, memo) for item in obj]
-        return copied_list
-
-    if isinstance(obj, dict):
-        copied_dict = {custom_deepcopy(k, memo): custom_deepcopy(v, memo) for k, v in obj.items()}
-        return copied_dict
-
-    # Perform a deepcopy excluding specific attributes with error handling
-    cls = obj.__class__
-    result = cls.__new__(cls)
-    memo[id(obj)] = result
-
-    attribute_error_occurred = False  # Flag to check if AttributeError occurs
-
-    try:
-        # Attempt to copy each attribute, excluding problematic ones
-        for k, v in getattr(obj, '__dict__', {}).items():
-            if k in ['_qdrant_client', '_qdrant_retriever']:
-                # Log or handle skipping these attributes
-                print(f"Skipping deepcopy for attribute: {k}")
-                continue
-            try:
-                # Use custom_deepcopy recursively and pass the memo
-                copied_value = custom_deepcopy(v, memo)
-                setattr(result, k, copied_value)
-            except (TypeError, ValueError) as e:
-                print(f"Error copying attribute {k}: {e}")
-    except AttributeError as e:
-        print(f"AttributeError encountered: {e}")
-        attribute_error_occurred = True
-
-    # If an AttributeError occurred during custom copying, fallback to vanilla deepcopy
-    if attribute_error_occurred:
-        try:
-            return copy.deepcopy(obj, memo)
-        except (TypeError, copy.Error) as e:
-            print(f"Failed to deepcopy using copy.deepcopy after AttributeError: {e}")
-            # Proceed with returning the partially copied result or handle as needed
-
-    return result
-
-
-
 
 
 def postprocess_parameter_name(name, value):
